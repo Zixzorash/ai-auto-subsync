@@ -77,6 +77,17 @@ function SubsyncWorkspace() {
     setNotice(`${parsed.length} subtitle cues ready to sync.`)
   }
 
+  const handleMediaFile = (file: File) => {
+    if (!isVideoFile(file) && !isSupportedAudioFile(file)) {
+      setNotice('This audio format isn’t supported. Choose MP3, WAV, M4A, FLAC, OGG, or WebM audio.')
+      if (audioInput.current) audioInput.current.value = ''
+      return
+    }
+    setAudioFile(file)
+    setDone(false)
+    setNotice('Media is ready. Add your subtitle file to continue.')
+  }
+
   const syncSubtitles = async () => {
     if (!audioFile || !subtitleFile) return
     if (!user) {
@@ -88,7 +99,7 @@ function SubsyncWorkspace() {
     setNotice('Listening to your audio and finding each line…')
     try {
       const response = await blink.ai.transcribeAudio({
-        audio: isVideoFile(audioFile) ? await extractVideoAudio(audioFile) : await audioFile.arrayBuffer(),
+        audio: isVideoFile(audioFile) ? await extractVideoAudio(audioFile) : await fileToDataUrl(audioFile),
         response_format: 'verbose_json',
       })
       const transcript = response as unknown as TranscriptResult
@@ -98,7 +109,7 @@ function SubsyncWorkspace() {
       setDone(true)
       setNotice(`Synced ${aligned.length} subtitle cues against the spoken audio.`)
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'We couldn’t sync this audio. Please try again.')
+      setNotice(getTranscriptionErrorMessage(error))
     } finally {
       setBusy(false)
     }
@@ -163,8 +174,8 @@ function SubsyncWorkspace() {
               icon={audioFile && isVideoFile(audioFile) ? <Film size={19} /> : <FileAudio size={19} />}
               selected={!!audioFile}
               inputRef={audioInput}
-              accept="audio/*,video/mp4,video/webm,video/quicktime,.mp3,.wav,.m4a,.flac,.ogg,.webm,.mp4,.mov"
-              onFile={(file) => { setAudioFile(file); setDone(false); setNotice('Media is ready. Add your subtitle file to continue.') }}
+              accept="audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/flac,audio/ogg,audio/webm,video/mp4,video/webm,video/quicktime,.mp3,.wav,.m4a,.flac,.ogg,.webm,.mp4,.mov"
+              onFile={handleMediaFile}
             />
             <FileDropCard
               label="02 · Your subtitles"
@@ -355,10 +366,32 @@ function formatBytes(bytes: number): string {
 }
 
 function isVideoFile(file: File): boolean {
-  return file.type.startsWith('video/') || /\.(mp4|mov|webm)$/i.test(file.name)
+  return file.type.startsWith('video/') || /\.(mp4|mov)$/i.test(file.name)
 }
 
-async function extractVideoAudio(file: File): Promise<ArrayBuffer> {
+function isSupportedAudioFile(file: File): boolean {
+  return /\.(mp3|wav|m4a|flac|ogg|webm)$/i.test(file.name) || /audio\/(mpeg|wav|x-wav|mp4|flac|ogg|webm)/i.test(file.type)
+}
+
+function fileToDataUrl(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('The audio file could not be prepared for transcription.'))
+    reader.onerror = () => reject(new Error('The audio file could not be read. Try selecting it again.'))
+    reader.readAsDataURL(file)
+  })
+}
+
+function getTranscriptionErrorMessage(error: unknown): string {
+  const details = error as { message?: string; status?: number }
+  const message = details?.message || 'We couldn’t sync this audio. Please try again.'
+  if (details?.status === 500 || message === 'Something went wrong!') {
+    return `The transcription service couldn’t process this file. Try a shorter supported audio file (MP3, WAV, M4A, FLAC, OGG, or WebM), or re-export the audio and try again. (${message})`
+  }
+  return message
+}
+
+async function extractVideoAudio(file: File): Promise<string> {
   const video = document.createElement('video') as HTMLVideoElement & { captureStream?: () => MediaStream; mozCaptureStream?: () => MediaStream }
   const sourceUrl = URL.createObjectURL(file)
   let stream: MediaStream | undefined
@@ -388,7 +421,7 @@ async function extractVideoAudio(file: File): Promise<ArrayBuffer> {
       void video.play().catch(() => reject(new Error('Your browser blocked video playback. Press play on the preview, then sync again.')))
     })
     if (!audioBlob.size) throw new Error('No audio could be extracted from this video.')
-    return await audioBlob.arrayBuffer()
+    return await fileToDataUrl(audioBlob)
   } finally {
     if (recorder && recorder.state !== 'inactive') recorder.stop()
     stream?.getTracks().forEach((track) => track.stop())
